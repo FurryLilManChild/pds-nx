@@ -1256,7 +1256,7 @@ int CompileBlocks::EmmitCode(Block *page, addrs * ParentT )
   }
 #endif 
 
-#if defined(ARCH_IS_LINUX)
+#if defined(ARCH_IS_LINUX) || defined(__SWITCH__)
   cacheflush((uintptr_t)page->code,(uintptr_t)ptr,0);
 #endif
 
