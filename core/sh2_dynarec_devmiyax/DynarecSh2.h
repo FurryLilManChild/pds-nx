@@ -211,6 +211,7 @@ extern "C" {
 class CompileBlocks {
 private:
   CompileBlocks(){
+    dCode = NULL;
     debug_mode_ = false;
     BuildInstructionList();
     Init();

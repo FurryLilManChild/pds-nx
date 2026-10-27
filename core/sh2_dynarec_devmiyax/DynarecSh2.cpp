@@ -729,7 +729,14 @@ x86op_desc asm_list[] =
 
 void CompileBlocks::Init()
 {
-  dCode = (Block*)ALLOCATE(sizeof(Block)*NUMOFBLOCKS);
+  // Every SH-2 reset (the game switches the slave CPU on and off) lands here.
+  // Reuse the code buffer instead of leaking a new one each time; on Switch
+  // executable memory is limited and ran out after a few resets.
+  if (dCode == NULL)
+    dCode = (Block*)ALLOCATE(sizeof(Block)*NUMOFBLOCKS);
+#ifdef __SWITCH__
+  nx_jit_make_writable();
+#endif
   memset((void*)dCode, 0, sizeof(Block)*NUMOFBLOCKS);
 
   memset(LookupTable, 0, sizeof(LookupTable));
