@@ -51,6 +51,9 @@ extern unsigned long long pdsnx_prof[4];
 void pdsnx_resolve_private_gl(void *(*get_proc)(const char *));
 }
 
+#define PDSNX_VERSION "1.0.0"
+static bool g_debug_log;
+
 /* Progress counters for the watchdog log. */
 static volatile u64 g_loop_iter;
 static volatile unsigned g_frames_shown;
@@ -73,6 +76,13 @@ static void watchdog_main(void *arg)
         unsigned frame = 0;
         int line = 0;
         pdsnx_debug_state(&frame, &line);
+        if (!g_debug_log) {
+            for (int i = 0; i < 4; i++) pdsnx_prof[i] = 0;
+            g_us_run = g_us_present = g_us_wait = 0;
+            g_underruns = 0;
+            last_shown = g_frames_shown;
+            continue;
+        }
         unsigned n = g_frames_shown - last_shown;
         u64 run = g_us_run, pres = g_us_present, wait = g_us_wait;
         g_us_run = g_us_present = g_us_wait = 0;
@@ -95,6 +105,7 @@ static void watchdog_main(void *arg)
 }
 
 #define BASE_DIR "sdmc:/switch/pds-nx"
+
 
 /* ------------------------------------------------------------------------ */
 /* Settings                                                                 */
@@ -166,7 +177,9 @@ static const std::vector<Setting> k_settings = {
     { "btn_r", "Saturn R", "Switch button for Saturn R", PAGE_CONTROLS, APPLY_FRONTEND, k_switch_buttons },
     { "btn_start", "Saturn Start", "Switch button for Saturn Start", PAGE_CONTROLS, APPLY_FRONTEND,
       k_switch_buttons },
-    /* Config file only; need a restart */
+    /* Config file only */
+    { "debug_log", "Debug log", "Write timing details to pds-nx.log every 2 seconds (for troubleshooting)",
+      PAGE_NONE, APPLY_RESTART, { { "off", "Off" }, { "on", "On" } } },
     { "yabasanshiro_sh2coretype", "SH-2 CPU", "dynarec (fast) or interpreter (slow, for troubleshooting); restart to apply",
       PAGE_NONE, APPLY_RESTART, { { "dynarec", "Dynarec" }, { "interpreter", "Interpreter" } } },
     { "yabasanshiro_system_language", "Saturn language",
@@ -194,6 +207,7 @@ static void set_default_options(void)
     g_options["gpu_mhz"] = "0";
     g_options["sync"] = "audio";
     g_options["show_fps"] = "off";
+    g_options["debug_log"] = "off";
     g_options["yabasanshiro_force_hle_bios"] = "disabled";
     g_options["yabasanshiro_frameskip"] = "enabled";
     g_options["yabasanshiro_addon_cart"] = "4M_extended_ram";
@@ -484,7 +498,7 @@ static void RETRO_CALLCONV video_refresh(const void *data, unsigned w, unsigned 
 {
     (void)pitch;
     g_frames_shown++;
-    if (g_frames_shown <= 5 || g_frames_shown % 600 == 0) {
+    if (g_debug_log && (g_frames_shown <= 5 || g_frames_shown % 600 == 0)) {
         nxlog("frame %u (%ux%u%s)", g_frames_shown, w, h, data == RETRO_HW_FRAME_BUFFER_VALID ? "" : ", dupe");
         nxlog_flush();
     }
@@ -961,6 +975,7 @@ static void draw_menu(void)
 
     static const char *titles[] = { "Panzer Dragoon Saga", "Video", "Performance", "Controls" };
     ui_text(px + 20, py + 24, 3, COL_TITLE, titles[g_menu_page]);
+    ui_text(px + pw - 20 - ui_text_width(1.5f, "v" PDSNX_VERSION), py + 30, 1.5f, COL_DIM, "v" PDSNX_VERSION);
 
     float x = px + 10, w = pw - 20, y = py + 84, rh = 36;
     int cur = g_menu_cursor[g_menu_page];
@@ -1151,7 +1166,7 @@ int main(int argc, char **argv)
     mkdir(BASE_DIR "/saves", 0777);
     mkdir(BASE_DIR "/states", 0777);
     nxlog_open(BASE_DIR "/pds-nx.log");
-    nxlog("pds-nx starting");
+    nxlog("pds-nx " PDSNX_VERSION " starting");
 
     /* Keep the main (emulation) thread on core 0; see thr-rthreads.c. */
     svcSetThreadCoreMask(CUR_THREAD_HANDLE, 0, 1u << 0);
@@ -1173,6 +1188,7 @@ int main(int argc, char **argv)
     set_default_options();
     load_config();
     update_bindings();
+    g_debug_log = g_options["debug_log"] == "on";
 
     nx_clock_apply(atoi(g_options["cpu_mhz"].c_str()), atoi(g_options["gpu_mhz"].c_str()));
     atexit(at_exit_cleanup);
@@ -1259,6 +1275,8 @@ int main(int argc, char **argv)
     nxlog("gl: compute entry points %s", SDL_GL_GetProcAddress("glDispatchCompute") ? "found" : "missing");
     if (g_hw.context_reset)
         g_hw.context_reset();
+    toast("Tap - for the menu");
+    g_toast_until = armGetSystemTick() + armNsToTicks(6000000000ULL);
     nxlog("running");
     nxlog_flush();
 

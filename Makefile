@@ -17,8 +17,8 @@ include $(DEVKITPRO)/libnx/switch_rules
 TARGET      := pds-nx
 BUILD       := build
 APP_TITLE   := Panzer Dragoon Saga
-APP_AUTHOR  := pds-nx / Yaba Sanshiro by devMiyax
-APP_VERSION := 0.1.0
+APP_AUTHOR  := pds-nx (Yaba Sanshiro core by devMiyax)
+APP_VERSION := 1.0.0
 ICON        := $(firstword $(wildcard switch/icon.jpg) $(LIBNX)/default_icon.jpg)
 
 # --------------------------------------------------------------------------

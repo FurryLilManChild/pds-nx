@@ -1512,6 +1512,9 @@ static FILE *pdsnx_tmpfile(void)
    return fopen("sdmc:/switch/pds-nx/states/scratch.tmp", "w+b");
 }
 #define tmpfile pdsnx_tmpfile
+#define PDSNX_TMP_DONE() remove("sdmc:/switch/pds-nx/states/scratch.tmp")
+#else
+#define PDSNX_TMP_DONE()
 #endif
 
 int YabSaveStateBuffer(void ** buffer, size_t * size)
@@ -1534,6 +1537,7 @@ int YabSaveStateBuffer(void ** buffer, size_t * size)
    if (status != 0)
    {
       fclose(fp);
+      PDSNX_TMP_DONE();
       return status;
    }
 
@@ -1548,6 +1552,7 @@ int YabSaveStateBuffer(void ** buffer, size_t * size)
    }
 
    fclose(fp);
+   PDSNX_TMP_DONE();
    return 0;
 }
 
@@ -1721,6 +1726,7 @@ int YabLoadStateBuffer(const void * buffer, size_t size)
    ScspUnLockThread();
 
    fclose(fp);
+   PDSNX_TMP_DONE();
 
    return status;
 }
