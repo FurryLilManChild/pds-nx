@@ -1505,6 +1505,15 @@ void FormatBackupRam(void *mem, u32 size)
 
 //////////////////////////////////////////////////////////////////////////////
 
+#if defined(__SWITCH__)
+/* No tmpfile() on Switch (it returns NULL); use a scratch file on the SD card. */
+static FILE *pdsnx_tmpfile(void)
+{
+   return fopen("sdmc:/switch/pds-nx/states/scratch.tmp", "w+b");
+}
+#define tmpfile pdsnx_tmpfile
+#endif
+
 int YabSaveStateBuffer(void ** buffer, size_t * size)
 {
    FILE * fp;
@@ -1515,6 +1524,8 @@ int YabSaveStateBuffer(void ** buffer, size_t * size)
    *size = 0;
 
    fp = tmpfile();
+   if (fp == NULL)
+      return -1;
 
    ScspLockThread();
    status = YabSaveStateStream(fp);
@@ -1699,6 +1710,8 @@ int YabLoadStateBuffer(const void * buffer, size_t size)
    int status;
 
    fp = tmpfile();
+   if (fp == NULL)
+      return -1;
    fwrite(buffer, 1, size, fp);
 
    fseek(fp, 0, SEEK_SET);

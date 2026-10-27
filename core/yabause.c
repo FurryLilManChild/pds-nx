@@ -643,6 +643,20 @@ u64 getM68KCounter();
 u64 g_m68K_dec_cycle = 0;
 
 
+/* pds-nx: frame time breakdown for the Switch log (ticks of the 19.2 MHz
+ * system counter, read and cleared by the frontend's watchdog). */
+#if defined(__SWITCH__)
+unsigned long long pdsnx_prof[4]; /* 0 SH-2s, 1 per-line VDP, 2 VBlank-in, 3 VBlank-out (render) */
+static inline unsigned long long pdsnx_ticks(void) {
+   unsigned long long v; __asm__ volatile("mrs %0, cntpct_el0" : "=r"(v)); return v;
+}
+#define PDS_T0 unsigned long long pds_t0 = pdsnx_ticks()
+#define PDS_ADD(i) pdsnx_prof[i] += pdsnx_ticks() - pds_t0
+#else
+#define PDS_T0
+#define PDS_ADD(i)
+#endif
+
 int YabauseEmulate(void) {
    int oneframeexec = 0;
    yabsys.frame_count++;
@@ -735,6 +749,7 @@ int YabauseEmulate(void) {
 #ifdef YAB_STATICS
       u64 current_cpu_clock = YabauseGetTicks();
 #endif
+      {PDS_T0;
       if( sync_shift != 0 ){
         u32 i;
         const u32 div = sync_shift;
@@ -756,6 +771,7 @@ int YabauseEmulate(void) {
         if (yabsys.IsSSH2Running)
           SH2Exec(SSH2, sh2cycles);
       }
+      PDS_ADD(0);}
 
 #ifdef YAB_STATICS
       cpu_emutime += (YabauseGetTicks() - current_cpu_clock) * 1000000 / yabsys.tickfreq;
@@ -764,13 +780,13 @@ int YabauseEmulate(void) {
        if(yabsys.DecilineCount == 9) {
          // HBlankIN
          PROFILE_START("hblankin");
-         Vdp2HBlankIN();
+         {PDS_T0; Vdp2HBlankIN(); PDS_ADD(1);}
          PROFILE_STOP("hblankin");
        }
        else if (yabsys.DecilineCount == 10) {
          // HBlankOUT
          PROFILE_START("hblankout");
-         Vdp2HBlankOUT();
+         {PDS_T0; Vdp2HBlankOUT(); PDS_ADD(1);}
          PROFILE_STOP("hblankout");
          PROFILE_START("SCSP");
          ScspExec();
@@ -786,7 +802,7 @@ int YabauseEmulate(void) {
             PROFILE_START("vblankin");
             // VBlankIN
             SmpcINTBACKEnd();
-            Vdp2VBlankIN();
+            {PDS_T0; Vdp2VBlankIN(); PDS_ADD(2);}
 #if defined(ASYNC_SCSP)
             SyncCPUtoSCSP();
 #endif
@@ -797,7 +813,7 @@ int YabauseEmulate(void) {
          {
             // VBlankOUT
             PROFILE_START("VDP1/VDP2");
-            Vdp2VBlankOUT();
+            {PDS_T0; Vdp2VBlankOUT(); PDS_ADD(3);}
             yabsys.LineCount = 0;
             oneframeexec = 1;
             PROFILE_STOP("VDP1/VDP2");

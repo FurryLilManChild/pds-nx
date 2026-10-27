@@ -47,6 +47,7 @@ int pdsnx_backup_flush(void);
 void pdsnx_debug_state(unsigned *frame, int *line);
 void nx_jit_shutdown(void);
 void pdsnx_apply_video_options(void);
+extern unsigned long long pdsnx_prof[4];
 }
 
 /* Progress counters for the watchdog log. */
@@ -77,9 +78,15 @@ static void watchdog_main(void *arg)
         unsigned und = g_underruns;
         g_underruns = 0;
         double d = n ? (double)n : 1.0;
-        nxlog("watchdog: frames=%u (+%u) emu=%.1fms draw=%.1fms idle=%.1fms audio_underruns=%u%s",
-              g_frames_shown, n, (run - pres) / 1000.0 / d, pres / 1000.0 / d, wait / 1000.0 / d, und,
-              n == 0 ? "  (no new frames)" : "");
+        double p[4];
+        for (int i = 0; i < 4; i++) {
+            p[i] = pdsnx_prof[i] / 19200.0 / d; /* 19.2 MHz ticks -> ms per frame */
+            pdsnx_prof[i] = 0;
+        }
+        nxlog("watchdog: frames=%u (+%u) emu=%.1fms [sh2=%.1f line=%.1f vbin=%.1f vbout=%.1f] draw=%.1fms "
+              "idle=%.1fms audio_underruns=%u%s",
+              g_frames_shown, n, (run - pres) / 1000.0 / d, p[0], p[1], p[2], p[3], pres / 1000.0 / d,
+              wait / 1000.0 / d, und, n == 0 ? "  (no new frames)" : "");
         (void)frame; (void)line;
         last_shown = g_frames_shown;
         nxlog_flush();
@@ -124,10 +131,9 @@ static const std::vector<Setting> k_settings = {
     { "yabasanshiro_resolution_mode", "Internal resolution", "How sharp the 3D is drawn", PAGE_VIDEO, APPLY_VIDEO,
       { { "original", "Original" }, { "2x", "2x" }, { "720p", "720p" }, { "1080p", "1080p" } } },
     { "yabasanshiro_polygon_mode", "Polygon mode",
-      "Perspective correction fixes warped textures. If something is missing (like the map), try a tessellation mode",
+      "Perspective correction fixes warped textures and is the fastest. CPU tessellation is an alternative",
       PAGE_VIDEO, APPLY_VIDEO,
-      { { "perspective_correction", "Perspective correction" }, { "gpu_tesselation", "GPU tessellation" },
-        { "cpu_tesselation", "CPU tessellation" } } },
+      { { "perspective_correction", "Perspective correction" }, { "cpu_tesselation", "CPU tessellation" } } },
     { "yabasanshiro_rbg_resolution_mode", "Sky/floor resolution",
       "Resolution of rotating backgrounds (sky and ground planes)", PAGE_VIDEO, APPLY_VIDEO,
       { { "original", "Original" }, { "2x", "2x" }, { "720p", "720p" }, { "1080p", "1080p" },
@@ -188,7 +194,7 @@ static void set_default_options(void)
     g_options["sync"] = "audio";
     g_options["show_fps"] = "off";
     g_options["yabasanshiro_force_hle_bios"] = "disabled";
-    g_options["yabasanshiro_frameskip"] = "disabled";
+    g_options["yabasanshiro_frameskip"] = "enabled";
     g_options["yabasanshiro_addon_cart"] = "4M_extended_ram";
     g_options["yabasanshiro_system_language"] = "english";
     g_options["yabasanshiro_multitap_port1"] = "disabled";
@@ -248,6 +254,9 @@ static void load_config(void)
         nxlog("config: %s=%s", k.c_str(), v.c_str());
     }
     fclose(f);
+    /* GPU tessellation is far too slow on Switch and hard to get out of. */
+    if (g_options["yabasanshiro_polygon_mode"] == "gpu_tesselation")
+        g_options["yabasanshiro_polygon_mode"] = "perspective_correction";
     /* Rewrite so the file picks up any settings added since it was created. */
     save_config();
 }
