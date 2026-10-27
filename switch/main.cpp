@@ -52,6 +52,10 @@ static volatile u64 g_loop_iter;
 static volatile unsigned g_frames_shown;
 static volatile int g_phase; /* 1 = in retro_run, 2 = presenting, 3 = between frames */
 static volatile bool g_watchdog_run;
+/* Timing, summed between watchdog lines (microseconds) */
+static volatile u64 g_us_run, g_us_present, g_us_wait;
+static volatile unsigned g_underruns;
+static u64 ticks_us(u64 t) { return armTicksToNs(t) / 1000; }
 static Thread g_watchdog;
 
 static void watchdog_main(void *arg)
@@ -65,9 +69,16 @@ static void watchdog_main(void *arg)
         unsigned frame = 0;
         int line = 0;
         pdsnx_debug_state(&frame, &line);
-        nxlog("watchdog: loops=%llu shown=%u emu_frame=%u line=%d phase=%d%s",
-              (unsigned long long)g_loop_iter, g_frames_shown, frame, line, g_phase,
-              g_frames_shown == last_shown ? "  (no new frames)" : "");
+        unsigned n = g_frames_shown - last_shown;
+        u64 run = g_us_run, pres = g_us_present, wait = g_us_wait;
+        g_us_run = g_us_present = g_us_wait = 0;
+        unsigned und = g_underruns;
+        g_underruns = 0;
+        double d = n ? (double)n : 1.0;
+        nxlog("watchdog: frames=%u (+%u) emu=%.1fms draw=%.1fms idle=%.1fms audio_underruns=%u%s",
+              g_frames_shown, n, (run - pres) / 1000.0 / d, pres / 1000.0 / d, wait / 1000.0 / d, und,
+              n == 0 ? "  (no new frames)" : "");
+        (void)frame; (void)line;
         last_shown = g_frames_shown;
         nxlog_flush();
     }
@@ -95,6 +106,10 @@ static const char *const k_default_config =
     "# Switch GPU speed in MHz, 0 leaves it alone. Try 768 if higher internal\n"
     "# resolutions stutter in handheld mode.\n"
     "gpu_mhz=0\n"
+    "\n"
+    "# What sets the game's pace: audio (smooth sound, recommended) or video\n"
+    "# (locks to the screen's refresh; sound can crackle if a frame runs late)\n"
+    "sync=audio\n"
     "\n"
     "aspect=4:3\n"
     "\n"
@@ -127,6 +142,7 @@ static void set_default_options(void)
     g_options["aspect"] = "4:3";
     g_options["filter"] = "linear";
     g_options["cpu_mhz"] = "1785";
+    g_options["sync"] = "audio";
     g_options["gpu_mhz"] = "0";
     g_options["yabasanshiro_force_hle_bios"] = "disabled";
     g_options["yabasanshiro_frameskip"] = "disabled";
@@ -352,7 +368,15 @@ static retro_proc_address_t RETRO_CALLCONV hw_get_proc_address(const char *sym)
     return (retro_proc_address_t)SDL_GL_GetProcAddress(sym);
 }
 
+static void present_inner(void);
 static void present(void)
+{
+    u64 t0 = armGetSystemTick();
+    present_inner();
+    g_us_present += ticks_us(armGetSystemTick() - t0);
+}
+
+static void present_inner(void)
 {
     int sw = 0, sh = 0;
     SDL_GL_GetDrawableSize(g_window, &sw, &sh);
@@ -404,14 +428,49 @@ static void RETRO_CALLCONV video_refresh(const void *data, unsigned w, unsigned 
 
 static SDL_AudioDeviceID g_audio;
 
+/*
+ * Audio sync: the sound queue sets the pace. We keep about AUDIO_TARGET of
+ * sound queued; the main loop runs the next frame only once the queue has
+ * drained below that. If the queue ever runs dry (the Switch fell behind),
+ * playback pauses until it has refilled, so a slow moment becomes one short
+ * pause instead of a stream of crackles.
+ */
+#define AUDIO_RATE    44100
+#define AUDIO_BYTES   4                                   /* 16-bit stereo */
+#define AUDIO_TARGET  (AUDIO_RATE * AUDIO_BYTES * 60 / 1000) /* 60 ms */
+#define AUDIO_MAX     (AUDIO_TARGET * 4)                  /* drop beyond 240 ms */
+
+static bool g_audio_sync = true;
+static bool g_audio_playing;
+
 static size_t RETRO_CALLCONV audio_sample_batch(const int16_t *data, size_t frames)
 {
     if (!g_audio)
         return frames;
-    /* Keep latency bounded: drop audio if more than ~100 ms is waiting. */
-    if (SDL_GetQueuedAudioSize(g_audio) < 44100 * 4 / 10)
-        SDL_QueueAudio(g_audio, data, (Uint32)(frames * 4));
+    Uint32 queued = SDL_GetQueuedAudioSize(g_audio);
+    if (g_audio_playing && queued == 0) {
+        g_underruns++;
+        SDL_PauseAudioDevice(g_audio, 1);
+        g_audio_playing = false;
+    }
+    if (queued < AUDIO_MAX)
+        SDL_QueueAudio(g_audio, data, (Uint32)(frames * AUDIO_BYTES));
+    if (!g_audio_playing && SDL_GetQueuedAudioSize(g_audio) >= AUDIO_TARGET) {
+        SDL_PauseAudioDevice(g_audio, 0);
+        g_audio_playing = true;
+    }
     return frames;
+}
+
+/* Called after each emulated frame in audio-sync mode. */
+static void audio_wait(void)
+{
+    if (!g_audio || !g_audio_sync || !g_audio_playing)
+        return;
+    u64 t0 = armGetSystemTick();
+    while (SDL_GetQueuedAudioSize(g_audio) > AUDIO_TARGET && g_audio_playing)
+        svcSleepThread(500000); /* 0.5 ms */
+    g_us_wait += ticks_us(armGetSystemTick() - t0);
 }
 
 static void RETRO_CALLCONV audio_sample(int16_t l, int16_t r)
@@ -433,8 +492,9 @@ static void open_audio(void)
         nxlog("audio: open failed: %s", SDL_GetError());
         return;
     }
-    nxlog("audio: %d Hz, %d channels, %d samples", have.freq, have.channels, have.samples);
-    SDL_PauseAudioDevice(g_audio, 0);
+    nxlog("audio: %d Hz, %d channels, %d samples, sync=%s", have.freq, have.channels, have.samples,
+          g_audio_sync ? "audio" : "video");
+    /* Stays paused until the first 60 ms are queued; see audio_sample_batch(). */
 }
 
 /* ------------------------------------------------------------------------ */
@@ -713,7 +773,8 @@ int main(int argc, char **argv)
         return 0;
     }
     SDL_GL_MakeCurrent(g_window, g_gl);
-    SDL_GL_SetSwapInterval(1);
+    g_audio_sync = g_options["sync"] != "video";
+    SDL_GL_SetSwapInterval(g_audio_sync ? 0 : 1);
     nxlog("gl: %s | %s | %s", glGetString(GL_VERSION), glGetString(GL_RENDERER),
           glGetString(GL_SHADING_LANGUAGE_VERSION));
     create_fbo(1920, 1080);
@@ -781,8 +842,11 @@ int main(int argc, char **argv)
         }
 
         g_phase = 1;
+        u64 t_run = armGetSystemTick();
         retro_run();
+        g_us_run += ticks_us(armGetSystemTick() - t_run);
         g_phase = 3;
+        audio_wait();
         g_loop_iter++;
 
         /* Once a second: write any new in-game saves to the SD card, flush the log. */
