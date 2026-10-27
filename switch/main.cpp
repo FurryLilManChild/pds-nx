@@ -48,6 +48,7 @@ void pdsnx_debug_state(unsigned *frame, int *line);
 void nx_jit_shutdown(void);
 void pdsnx_apply_video_options(void);
 extern unsigned long long pdsnx_prof[4];
+void pdsnx_resolve_private_gl(void *(*get_proc)(const char *));
 }
 
 /* Progress counters for the watchdog log. */
@@ -1254,6 +1255,8 @@ int main(int argc, char **argv)
 
     /* The core sets up its renderer when the GL context is handed over. */
     glBindFramebuffer(GL_FRAMEBUFFER, g_fbo);
+    pdsnx_resolve_private_gl([](const char *n) -> void * { return SDL_GL_GetProcAddress(n); });
+    nxlog("gl: compute entry points %s", SDL_GL_GetProcAddress("glDispatchCompute") ? "found" : "missing");
     if (g_hw.context_reset)
         g_hw.context_reset();
     nxlog("running");
