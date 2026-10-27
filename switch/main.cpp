@@ -38,6 +38,7 @@
 
 #include "nx_clock.h"
 #include "nx_log.h"
+#include "nx_ui.h"
 
 extern "C" {
 void pdsnx_open_tray(void);
@@ -45,6 +46,7 @@ int pdsnx_close_tray(const char *path);
 int pdsnx_backup_flush(void);
 void pdsnx_debug_state(unsigned *frame, int *line);
 void nx_jit_shutdown(void);
+void pdsnx_apply_video_options(void);
 }
 
 /* Progress counters for the watchdog log. */
@@ -93,57 +95,98 @@ static void watchdog_main(void *arg)
 static std::map<std::string, std::string> g_options;
 static bool g_options_dirty;
 
-static const char *const k_default_config =
-    "# pds-nx settings. Edit on your PC or with a Switch text editor.\n"
-    "# Lines starting with # are ignored. Changes apply the next time you launch.\n"
-    "\n"
-    "# Screen shape: 4:3 (original) or 16:9 (stretched to fill)\n"
-    "# Switch CPU speed while playing, in MHz. Stock is 1020; 1785 is the highest\n"
-    "# safe speed and what the emulator needs for full speed. 0 leaves it alone\n"
-    "# (use that if you'd rather manage clocks with sys-clk).\n"
-    "cpu_mhz=1785\n"
-    "\n"
-    "# Switch GPU speed in MHz, 0 leaves it alone. Try 768 if higher internal\n"
-    "# resolutions stutter in handheld mode.\n"
-    "gpu_mhz=0\n"
-    "\n"
-    "# What sets the game's pace: audio (smooth sound, recommended) or video\n"
-    "# (locks to the screen's refresh; sound can crackle if a frame runs late)\n"
-    "sync=audio\n"
-    "\n"
-    "aspect=4:3\n"
-    "\n"
-    "# Scaling filter when drawing to the screen: linear or nearest\n"
-    "filter=linear\n"
-    "\n"
-    "# Internal rendering resolution: original, 2x, 720p, 1080p\n"
-    "yabasanshiro_resolution_mode=original\n"
-    "\n"
-    "# Rotating background (sky and floor planes) resolution: original, 2x, 720p, 1080p, Fit_to_emulation\n"
-    "yabasanshiro_rbg_resolution_mode=original\n"
-    "\n"
-    "# Use compute shaders for rotating backgrounds: disabled or enabled\n"
-    "yabasanshiro_rbg_use_compute_shader=disabled\n"
-    "\n"
-    "# perspective_correction removes the Saturn's warped textures; gpu_tesselation and cpu_tesselation are alternatives\n"
-    "yabasanshiro_polygon_mode=perspective_correction\n"
-    "\n"
-    "# Skip frames automatically when the Switch can't keep up: disabled or enabled\n"
-    "yabasanshiro_frameskip=disabled\n"
-    "\n"
-    "# SH-2 CPU emulation: dynarec (fast) or interpreter (slow, for troubleshooting)\n"
-    "yabasanshiro_sh2coretype=dynarec\n"
-    "\n"
-    "# Saturn system language: english, deutsch, french, spanish, italian, japanese\n"
-    "yabasanshiro_system_language=english\n";
+enum { PAGE_NONE, PAGE_VIDEO, PAGE_PERF, PAGE_CONTROLS };
+enum { APPLY_FRONTEND, APPLY_VIDEO, APPLY_CLOCK, APPLY_SYNC, APPLY_RESTART };
+
+struct Choice { const char *value; const char *label; };
+struct Setting {
+    const char *key;
+    const char *label;
+    const char *comment;
+    int page;
+    int apply;
+    std::vector<Choice> choices;
+};
+
+/* Switch buttons a Saturn button can be assigned to (used by the btn_* keys). */
+static const std::vector<Choice> k_switch_buttons = {
+    { "A", "A" }, { "B", "B" }, { "X", "X" }, { "Y", "Y" }, { "L", "L" }, { "R", "R" },
+    { "ZL", "ZL" }, { "ZR", "ZR" }, { "Plus", "+" }, { "LStick", "Left stick click" },
+    { "RStick", "Right stick click" }, { "None", "(none)" },
+};
+
+static const std::vector<Setting> k_settings = {
+    /* Video */
+    { "aspect", "Screen shape", "4:3 (original) or 16:9 (stretched to fill)", PAGE_VIDEO, APPLY_FRONTEND,
+      { { "4:3", "4:3 original" }, { "16:9", "16:9 stretched" } } },
+    { "filter", "Scaling filter", "linear (smooth) or nearest (sharp pixels)", PAGE_VIDEO, APPLY_FRONTEND,
+      { { "linear", "Smooth" }, { "nearest", "Sharp" } } },
+    { "yabasanshiro_resolution_mode", "Internal resolution", "How sharp the 3D is drawn", PAGE_VIDEO, APPLY_VIDEO,
+      { { "original", "Original" }, { "2x", "2x" }, { "720p", "720p" }, { "1080p", "1080p" } } },
+    { "yabasanshiro_polygon_mode", "Polygon mode",
+      "Perspective correction fixes warped textures. If something is missing (like the map), try a tessellation mode",
+      PAGE_VIDEO, APPLY_VIDEO,
+      { { "perspective_correction", "Perspective correction" }, { "gpu_tesselation", "GPU tessellation" },
+        { "cpu_tesselation", "CPU tessellation" } } },
+    { "yabasanshiro_rbg_resolution_mode", "Sky/floor resolution",
+      "Resolution of rotating backgrounds (sky and ground planes)", PAGE_VIDEO, APPLY_VIDEO,
+      { { "original", "Original" }, { "2x", "2x" }, { "720p", "720p" }, { "1080p", "1080p" },
+        { "Fit_to_emulation", "Match internal" } } },
+    { "yabasanshiro_rbg_use_compute_shader", "Sky/floor on compute shader",
+      "Draw rotating backgrounds with compute shaders", PAGE_VIDEO, APPLY_VIDEO,
+      { { "disabled", "Off" }, { "enabled", "On" } } },
+    /* Performance */
+    { "cpu_mhz", "CPU clock", "Switch CPU speed while playing, in MHz (0 = stock 1020; 1785 recommended)",
+      PAGE_PERF, APPLY_CLOCK,
+      { { "0", "Stock (1020)" }, { "1224", "1224 MHz" }, { "1428", "1428 MHz" }, { "1581", "1581 MHz" },
+        { "1785", "1785 MHz" } } },
+    { "gpu_mhz", "GPU clock", "Switch GPU speed in MHz (0 = leave alone)", PAGE_PERF, APPLY_CLOCK,
+      { { "0", "Stock" }, { "460", "460 MHz" }, { "614", "614 MHz" }, { "768", "768 MHz" } } },
+    { "sync", "Timing", "audio = smooth sound (recommended); video = lock to the screen refresh",
+      PAGE_PERF, APPLY_SYNC, { { "audio", "Audio sync" }, { "video", "Video sync" } } },
+    { "yabasanshiro_frameskip", "Auto frameskip", "Skip frames when the Switch falls behind", PAGE_PERF,
+      APPLY_VIDEO, { { "disabled", "Off" }, { "enabled", "On" } } },
+    { "show_fps", "Show FPS", "Frames per second in the corner", PAGE_PERF, APPLY_FRONTEND,
+      { { "off", "Off" }, { "on", "On" } } },
+    /* Controls (Saturn button -> Switch button) */
+    { "btn_a", "Saturn A", "Switch button for Saturn A", PAGE_CONTROLS, APPLY_FRONTEND, k_switch_buttons },
+    { "btn_b", "Saturn B", "Switch button for Saturn B", PAGE_CONTROLS, APPLY_FRONTEND, k_switch_buttons },
+    { "btn_c", "Saturn C", "Switch button for Saturn C", PAGE_CONTROLS, APPLY_FRONTEND, k_switch_buttons },
+    { "btn_x", "Saturn X", "Switch button for Saturn X", PAGE_CONTROLS, APPLY_FRONTEND, k_switch_buttons },
+    { "btn_y", "Saturn Y", "Switch button for Saturn Y", PAGE_CONTROLS, APPLY_FRONTEND, k_switch_buttons },
+    { "btn_z", "Saturn Z", "Switch button for Saturn Z", PAGE_CONTROLS, APPLY_FRONTEND, k_switch_buttons },
+    { "btn_l", "Saturn L", "Switch button for Saturn L", PAGE_CONTROLS, APPLY_FRONTEND, k_switch_buttons },
+    { "btn_r", "Saturn R", "Switch button for Saturn R", PAGE_CONTROLS, APPLY_FRONTEND, k_switch_buttons },
+    { "btn_start", "Saturn Start", "Switch button for Saturn Start", PAGE_CONTROLS, APPLY_FRONTEND,
+      k_switch_buttons },
+    /* Config file only; need a restart */
+    { "yabasanshiro_sh2coretype", "SH-2 CPU", "dynarec (fast) or interpreter (slow, for troubleshooting); restart to apply",
+      PAGE_NONE, APPLY_RESTART, { { "dynarec", "Dynarec" }, { "interpreter", "Interpreter" } } },
+    { "yabasanshiro_system_language", "Saturn language",
+      "english, deutsch, french, spanish, italian, japanese; restart to apply", PAGE_NONE, APPLY_RESTART,
+      { { "english", "English" }, { "deutsch", "Deutsch" }, { "french", "French" }, { "spanish", "Spanish" },
+        { "italian", "Italian" }, { "japanese", "Japanese" } } },
+};
+
+static const char *const k_default_buttons[][2] = {
+    { "btn_a", "Y" }, { "btn_b", "B" }, { "btn_c", "A" }, { "btn_x", "ZL" }, { "btn_y", "X" },
+    { "btn_z", "ZR" }, { "btn_l", "L" }, { "btn_r", "R" }, { "btn_start", "Plus" },
+};
+
+static void set_default_buttons(void)
+{
+    for (auto &d : k_default_buttons)
+        g_options[d[0]] = d[1];
+}
 
 static void set_default_options(void)
 {
     g_options["aspect"] = "4:3";
     g_options["filter"] = "linear";
     g_options["cpu_mhz"] = "1785";
-    g_options["sync"] = "audio";
     g_options["gpu_mhz"] = "0";
+    g_options["sync"] = "audio";
+    g_options["show_fps"] = "off";
     g_options["yabasanshiro_force_hle_bios"] = "disabled";
     g_options["yabasanshiro_frameskip"] = "disabled";
     g_options["yabasanshiro_addon_cart"] = "4M_extended_ram";
@@ -155,6 +198,7 @@ static void set_default_options(void)
     g_options["yabasanshiro_resolution_mode"] = "original";
     g_options["yabasanshiro_rbg_resolution_mode"] = "original";
     g_options["yabasanshiro_rbg_use_compute_shader"] = "disabled";
+    set_default_buttons();
 }
 
 static std::string trim(const std::string &s)
@@ -164,16 +208,31 @@ static std::string trim(const std::string &s)
     return a == std::string::npos ? std::string() : s.substr(a, b - a + 1);
 }
 
+#define CONFIG_PATH BASE_DIR "/config.ini"
+
+static void save_config(void)
+{
+    FILE *f = fopen(CONFIG_PATH, "w");
+    if (!f) {
+        nxlog("config: cannot write %s", CONFIG_PATH);
+        return;
+    }
+    fputs("# pds-nx settings. Most of these can be changed in game: tap - (Minus).\n"
+          "# Lines starting with # are ignored.\n\n", f);
+    for (const Setting &st : k_settings) {
+        fprintf(f, "# %s\n# options:", st.comment);
+        for (size_t i = 0; i < st.choices.size(); i++)
+            fprintf(f, "%s %s", i ? "," : "", st.choices[i].value);
+        fprintf(f, "\n%s=%s\n\n", st.key, g_options[st.key].c_str());
+    }
+    fclose(f);
+}
+
 static void load_config(void)
 {
-    const char *path = BASE_DIR "/config.ini";
-    FILE *f = fopen(path, "r");
+    FILE *f = fopen(CONFIG_PATH, "r");
     if (!f) {
-        f = fopen(path, "w");
-        if (f) {
-            fputs(k_default_config, f);
-            fclose(f);
-        }
+        save_config();
         return;
     }
     char line[512];
@@ -189,6 +248,8 @@ static void load_config(void)
         nxlog("config: %s=%s", k.c_str(), v.c_str());
     }
     fclose(f);
+    /* Rewrite so the file picks up any settings added since it was created. */
+    save_config();
 }
 
 /* ------------------------------------------------------------------------ */
@@ -368,6 +429,7 @@ static retro_proc_address_t RETRO_CALLCONV hw_get_proc_address(const char *sym)
     return (retro_proc_address_t)SDL_GL_GetProcAddress(sym);
 }
 
+static void draw_overlay(void);
 static void present_inner(void);
 static void present(void)
 {
@@ -398,6 +460,8 @@ static void present_inner(void)
     unsigned fw = std::min(g_frame_w, g_fbo_w), fh = std::min(g_frame_h, g_fbo_h);
     glBlitFramebuffer(0, 0, fw, fh, dx, dy, dx + dw, dy + dh, GL_COLOR_BUFFER_BIT,
                       g_options["filter"] == "nearest" ? GL_NEAREST : GL_LINEAR);
+    draw_overlay();
+    ui_flush(sw, sh);
     SDL_GL_SwapWindow(g_window);
 
     /* Hand the core back its own frame buffer and state. */
@@ -504,14 +568,42 @@ static void open_audio(void)
 static PadState g_pad;
 static uint16_t g_retropad;  /* RETRO_DEVICE_ID_JOYPAD_* bits for player 1 */
 
+static u64 switch_button_mask(const std::string &name)
+{
+    if (name == "A") return HidNpadButton_A;
+    if (name == "B") return HidNpadButton_B;
+    if (name == "X") return HidNpadButton_X;
+    if (name == "Y") return HidNpadButton_Y;
+    if (name == "L") return HidNpadButton_L;
+    if (name == "R") return HidNpadButton_R;
+    if (name == "ZL") return HidNpadButton_ZL;
+    if (name == "ZR") return HidNpadButton_ZR;
+    if (name == "Plus") return HidNpadButton_Plus;
+    if (name == "LStick") return HidNpadButton_StickL;
+    if (name == "RStick") return HidNpadButton_StickR;
+    return 0;
+}
+
 /*
- * Default layout. The Saturn pad has A B C on the bottom row and X Y Z above.
- *   Saturn A <- Switch Y      Saturn X <- ZL     Saturn L <- L
- *   Saturn B <- Switch B      Saturn Y <- X      Saturn R <- R
- *   Saturn C <- Switch A      Saturn Z <- ZR     Start    <- +
- * The core routes RetroPad buttons to Saturn ones as: B->A, A->B, L->C,
- * Y->X, X->Y, R->Z, L2->L, R2->R.
+ * Saturn buttons in btn_* order, with the RetroPad id the core turns into
+ * each one (the core routes B->A, A->B, L->C, Y->X, X->Y, R->Z, L2->L, R2->R).
+ * Default layout: Saturn A B C on Switch Y B A, X Y Z on ZL X ZR, L R on L R.
  */
+static const struct { const char *key; unsigned retro; } k_saturn_buttons[] = {
+    { "btn_a", RETRO_DEVICE_ID_JOYPAD_B },  { "btn_b", RETRO_DEVICE_ID_JOYPAD_A },
+    { "btn_c", RETRO_DEVICE_ID_JOYPAD_L },  { "btn_x", RETRO_DEVICE_ID_JOYPAD_Y },
+    { "btn_y", RETRO_DEVICE_ID_JOYPAD_X },  { "btn_z", RETRO_DEVICE_ID_JOYPAD_R },
+    { "btn_l", RETRO_DEVICE_ID_JOYPAD_L2 }, { "btn_r", RETRO_DEVICE_ID_JOYPAD_R2 },
+    { "btn_start", RETRO_DEVICE_ID_JOYPAD_START },
+};
+static u64 g_bind[9];
+
+static void update_bindings(void)
+{
+    for (int i = 0; i < 9; i++)
+        g_bind[i] = switch_button_mask(g_options[k_saturn_buttons[i].key]);
+}
+
 static uint16_t map_buttons(u64 b, HidAnalogStickState stick)
 {
     uint16_t m = 0;
@@ -520,15 +612,9 @@ static uint16_t map_buttons(u64 b, HidAnalogStickState stick)
     if ((b & HidNpadButton_Down)  || stick.y < -dz) m |= 1 << RETRO_DEVICE_ID_JOYPAD_DOWN;
     if ((b & HidNpadButton_Left)  || stick.x < -dz) m |= 1 << RETRO_DEVICE_ID_JOYPAD_LEFT;
     if ((b & HidNpadButton_Right) || stick.x >  dz) m |= 1 << RETRO_DEVICE_ID_JOYPAD_RIGHT;
-    if (b & HidNpadButton_Y)  m |= 1 << RETRO_DEVICE_ID_JOYPAD_B;  /* Saturn A */
-    if (b & HidNpadButton_B)  m |= 1 << RETRO_DEVICE_ID_JOYPAD_A;  /* Saturn B */
-    if (b & HidNpadButton_A)  m |= 1 << RETRO_DEVICE_ID_JOYPAD_L;  /* Saturn C */
-    if (b & HidNpadButton_ZL) m |= 1 << RETRO_DEVICE_ID_JOYPAD_Y;  /* Saturn X */
-    if (b & HidNpadButton_X)  m |= 1 << RETRO_DEVICE_ID_JOYPAD_X;  /* Saturn Y */
-    if (b & HidNpadButton_ZR) m |= 1 << RETRO_DEVICE_ID_JOYPAD_R;  /* Saturn Z */
-    if (b & HidNpadButton_L)  m |= 1 << RETRO_DEVICE_ID_JOYPAD_L2; /* Saturn L */
-    if (b & HidNpadButton_R)  m |= 1 << RETRO_DEVICE_ID_JOYPAD_R2; /* Saturn R */
-    if (b & HidNpadButton_Plus) m |= 1 << RETRO_DEVICE_ID_JOYPAD_START;
+    for (int i = 0; i < 9; i++)
+        if (g_bind[i] && (b & g_bind[i]))
+            m |= 1 << k_saturn_buttons[i].retro;
     return m;
 }
 
@@ -548,38 +634,53 @@ static int16_t RETRO_CALLCONV input_state(unsigned port, unsigned device, unsign
 /* Save states and discs                                                    */
 /* ------------------------------------------------------------------------ */
 
+/* Short on-screen message (bottom left). */
+static char g_toast[128];
+static u64 g_toast_until;
+
+static void toast(const char *fmt, ...)
+{
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(g_toast, sizeof(g_toast), fmt, ap);
+    va_end(ap);
+    g_toast_until = armGetSystemTick() + armNsToTicks(2500000000ULL);
+    nxlog("msg: %s", g_toast);
+}
+
+#define STATE_SLOTS 10
+
+static std::string state_path(int slot)
+{
+    char path[256];
+    snprintf(path, sizeof(path), BASE_DIR "/states/slot%d.state", slot);
+    return path;
+}
+
 static void save_state(int slot)
 {
     size_t size = retro_serialize_size();
-    if (!size) {
-        nxlog("state: not available yet");
-        return;
-    }
     std::vector<uint8_t> buf(size);
-    if (!retro_serialize(buf.data(), size)) {
-        nxlog("state: serialize failed");
+    if (!size || !retro_serialize(buf.data(), size)) {
+        toast("Could not save state");
         return;
     }
-    char path[256];
-    snprintf(path, sizeof(path), BASE_DIR "/states/slot%d.state", slot);
-    FILE *f = fopen(path, "wb");
+    FILE *f = fopen(state_path(slot).c_str(), "wb");
     if (!f) {
-        nxlog("state: cannot write %s", path);
+        toast("Could not write slot %d", slot);
         return;
     }
     fwrite(buf.data(), 1, size, f);
     fclose(f);
-    nxlog("state: saved slot %d (%zu bytes)", slot, size);
+    toast("Saved state to slot %d", slot);
 }
 
-static void load_state(int slot)
+static bool load_state(int slot)
 {
-    char path[256];
-    snprintf(path, sizeof(path), BASE_DIR "/states/slot%d.state", slot);
-    FILE *f = fopen(path, "rb");
+    FILE *f = fopen(state_path(slot).c_str(), "rb");
     if (!f) {
-        nxlog("state: no %s", path);
-        return;
+        toast("Slot %d is empty", slot);
+        return false;
     }
     fseek(f, 0, SEEK_END);
     long size = ftell(f);
@@ -587,10 +688,12 @@ static void load_state(int slot)
     std::vector<uint8_t> buf(size > 0 ? size : 0);
     size_t got = fread(buf.data(), 1, buf.size(), f);
     fclose(f);
-    if (got == buf.size() && retro_unserialize(buf.data(), buf.size()))
-        nxlog("state: loaded slot %d", slot);
-    else
-        nxlog("state: load failed for slot %d", slot);
+    if (got == buf.size() && retro_unserialize(buf.data(), buf.size())) {
+        toast("Loaded slot %d", slot);
+        return true;
+    }
+    toast("Could not load slot %d", slot);
+    return false;
 }
 
 static void change_disc(int index)
@@ -600,10 +703,346 @@ static void change_disc(int index)
     nxlog("disc: switching to disc %d", index + 1);
     pdsnx_open_tray();
     int rc = pdsnx_close_tray(g_discs[index].c_str());
-    if (rc == 0)
+    if (rc == 0) {
         g_current_disc = index;
-    else
-        nxlog("disc: change failed (%d)", rc);
+        toast("Disc %d inserted", index + 1);
+    } else {
+        toast("Could not insert disc %d", index + 1);
+    }
+}
+
+/* ------------------------------------------------------------------------ */
+/* In-game menu (tap - to open)                                             */
+/* ------------------------------------------------------------------------ */
+
+enum { MENU_MAIN, MENU_VIDEO, MENU_PERF, MENU_CONTROLS };
+enum { MAIN_RESUME, MAIN_SAVE, MAIN_LOAD, MAIN_DISC, MAIN_VIDEO, MAIN_PERF, MAIN_CONTROLS, MAIN_RESET,
+       MAIN_QUIT, MAIN_COUNT };
+
+static bool g_menu_open;
+static int g_menu_page = MENU_MAIN;
+static int g_menu_cursor[4];
+static int g_slot = 1;
+static int g_disc_sel;
+static bool g_quit_confirm;
+static bool g_quit_requested;
+static unsigned g_fps;
+static u64 g_nav_prev, g_nav_next_repeat;
+
+static void open_menu(void)
+{
+    g_menu_open = true;
+    g_menu_page = MENU_MAIN;
+    g_quit_confirm = false;
+    g_disc_sel = g_current_disc;
+    g_retropad = 0;
+    if (g_audio) {
+        SDL_PauseAudioDevice(g_audio, 1);
+        SDL_ClearQueuedAudio(g_audio);
+        g_audio_playing = false; /* resumes once the queue refills */
+    }
+}
+
+static void close_menu(void)
+{
+    g_menu_open = false;
+}
+
+/* Settings shown on a menu page, in table order. */
+static std::vector<const Setting *> page_settings(int page)
+{
+    int want = page == MENU_VIDEO ? PAGE_VIDEO : page == MENU_PERF ? PAGE_PERF : PAGE_CONTROLS;
+    std::vector<const Setting *> v;
+    for (const Setting &st : k_settings)
+        if (st.page == want)
+            v.push_back(&st);
+    return v;
+}
+
+static int choice_index(const Setting &st)
+{
+    const std::string &cur = g_options[st.key];
+    for (size_t i = 0; i < st.choices.size(); i++)
+        if (cur == st.choices[i].value)
+            return (int)i;
+    return -1;
+}
+
+static void apply_setting(const Setting &st)
+{
+    switch (st.apply) {
+    case APPLY_FRONTEND:
+        update_bindings();
+        break;
+    case APPLY_VIDEO:
+        pdsnx_apply_video_options();
+        break;
+    case APPLY_CLOCK:
+        nx_clock_apply(atoi(g_options["cpu_mhz"].c_str()), atoi(g_options["gpu_mhz"].c_str()));
+        break;
+    case APPLY_SYNC:
+        g_audio_sync = g_options["sync"] != "video";
+        SDL_GL_SetSwapInterval(g_audio_sync ? 0 : 1);
+        break;
+    default:
+        break;
+    }
+    save_config();
+}
+
+static void cycle_setting(const Setting &st, int dir)
+{
+    int n = (int)st.choices.size();
+    int i = choice_index(st);
+    i = i < 0 ? 0 : (i + dir + n) % n;
+    g_options[st.key] = st.choices[i].value;
+    nxlog("menu: %s=%s", st.key, st.choices[i].value);
+    apply_setting(st);
+}
+
+static int page_rows(void)
+{
+    if (g_menu_page == MENU_MAIN)
+        return MAIN_COUNT;
+    int n = (int)page_settings(g_menu_page).size() + 1; /* + Back */
+    if (g_menu_page == MENU_CONTROLS)
+        n++; /* + Reset to default */
+    return n;
+}
+
+static void menu_activate(int row, int dir)
+{
+    /* dir: 0 = A pressed, -1/+1 = left/right */
+    if (g_menu_page == MENU_MAIN) {
+        if (row != MAIN_QUIT)
+            g_quit_confirm = false;
+        switch (row) {
+        case MAIN_RESUME:
+            if (!dir) close_menu();
+            break;
+        case MAIN_SAVE:
+        case MAIN_LOAD:
+            if (dir) {
+                g_slot = (g_slot - 1 + dir + STATE_SLOTS) % STATE_SLOTS + 1;
+            } else if (row == MAIN_SAVE) {
+                save_state(g_slot);
+                close_menu();
+            } else if (load_state(g_slot)) {
+                close_menu();
+            }
+            break;
+        case MAIN_DISC:
+            if (dir && g_disc_count > 0) {
+                g_disc_sel = (g_disc_sel + dir + g_disc_count) % g_disc_count;
+            } else if (!dir) {
+                if (g_disc_sel == g_current_disc)
+                    toast("Disc %d is already in", g_disc_sel + 1);
+                else {
+                    change_disc(g_disc_sel);
+                    close_menu();
+                }
+            }
+            break;
+        case MAIN_VIDEO:
+        case MAIN_PERF:
+        case MAIN_CONTROLS:
+            if (!dir) {
+                g_menu_page = row == MAIN_VIDEO ? MENU_VIDEO : row == MAIN_PERF ? MENU_PERF : MENU_CONTROLS;
+                g_menu_cursor[g_menu_page] = 0;
+            }
+            break;
+        case MAIN_RESET:
+            if (!dir) {
+                retro_reset();
+                toast("Game reset");
+                close_menu();
+            }
+            break;
+        case MAIN_QUIT:
+            if (!dir) {
+                if (g_quit_confirm)
+                    g_quit_requested = true;
+                else
+                    g_quit_confirm = true;
+            }
+            break;
+        }
+        return;
+    }
+
+    std::vector<const Setting *> items = page_settings(g_menu_page);
+    int n = (int)items.size();
+    if (row < n) {
+        cycle_setting(*items[row], dir ? dir : 1);
+    } else if (g_menu_page == MENU_CONTROLS && row == n) {
+        if (!dir) {
+            set_default_buttons();
+            update_bindings();
+            save_config();
+            toast("Controls reset to default");
+        }
+    } else if (!dir) {
+        g_menu_page = MENU_MAIN; /* Back */
+    }
+}
+
+static void menu_input(u64 held, u64 down, HidAnalogStickState stick)
+{
+    const int dz = 0x5000;
+    u64 nav = held & (HidNpadButton_Up | HidNpadButton_Down | HidNpadButton_Left | HidNpadButton_Right);
+    if (stick.y > dz) nav |= HidNpadButton_Up;
+    if (stick.y < -dz) nav |= HidNpadButton_Down;
+    if (stick.x < -dz) nav |= HidNpadButton_Left;
+    if (stick.x > dz) nav |= HidNpadButton_Right;
+
+    /* Directions fire on press, then repeat while held. */
+    u64 now = armGetSystemTick();
+    u64 fire = nav & ~g_nav_prev;
+    if (fire)
+        g_nav_next_repeat = now + armNsToTicks(400000000ULL);
+    else if (nav && nav == g_nav_prev && now >= g_nav_next_repeat) {
+        fire = nav;
+        g_nav_next_repeat = now + armNsToTicks(90000000ULL);
+    }
+    g_nav_prev = nav;
+
+    int rows = page_rows();
+    int &cur = g_menu_cursor[g_menu_page];
+    if (fire & HidNpadButton_Up)   cur = (cur - 1 + rows) % rows;
+    if (fire & HidNpadButton_Down) cur = (cur + 1) % rows;
+    if (fire & HidNpadButton_Left)  menu_activate(cur, -1);
+    if (fire & HidNpadButton_Right) menu_activate(cur, +1);
+    if (down & HidNpadButton_A)     menu_activate(cur, 0);
+
+    if (down & HidNpadButton_Minus) {
+        close_menu();
+    } else if (down & HidNpadButton_B) {
+        if (g_menu_page == MENU_MAIN)
+            close_menu();
+        else
+            g_menu_page = MENU_MAIN;
+    }
+}
+
+#define COL_TEXT   0xE8E8E8FF
+#define COL_DIM    0x9AA4B0FF
+#define COL_TITLE  0xF2C35BFF
+#define COL_SEL    0x2E5E8EFF
+#define COL_PANEL  0x101820E8
+
+static void draw_row(float x, float y, float w, bool sel, const char *label, const char *value, bool arrows)
+{
+    if (sel)
+        ui_rect(x, y - 8, w, 32, COL_SEL);
+    ui_text(x + 20, y, 2, COL_TEXT, label);
+    if (value && *value) {
+        char buf[96];
+        snprintf(buf, sizeof(buf), (sel && arrows) ? "< %s >" : "%s", value);
+        ui_text(x + w - 20 - ui_text_width(2, buf), y, 2, sel ? COL_TEXT : COL_DIM, buf);
+    }
+}
+
+static void draw_menu(void)
+{
+    const float px = 250, pw = 780, py = 50, ph = 620;
+    ui_rect(0, 0, UI_W, UI_H, 0x00000090);
+    ui_rect(px, py, pw, ph, COL_PANEL);
+    ui_rect(px, py, pw, 4, COL_TITLE);
+
+    static const char *titles[] = { "Panzer Dragoon Saga", "Video", "Performance", "Controls" };
+    ui_text(px + 20, py + 24, 3, COL_TITLE, titles[g_menu_page]);
+
+    float x = px + 10, w = pw - 20, y = py + 84, rh = 36;
+    int cur = g_menu_cursor[g_menu_page];
+    const char *help = "";
+    char v[96];
+
+    if (g_menu_page == MENU_MAIN) {
+        for (int r = 0; r < MAIN_COUNT; r++, y += rh) {
+            bool sel = r == cur;
+            switch (r) {
+            case MAIN_RESUME: draw_row(x, y, w, sel, "Resume", "", false); break;
+            case MAIN_SAVE:
+                snprintf(v, sizeof(v), "Slot %d%s", g_slot, file_exists(state_path(g_slot)) ? " (used)" : "");
+                draw_row(x, y, w, sel, "Save state", v, true);
+                if (sel) help = "Left/Right picks the slot, A saves";
+                break;
+            case MAIN_LOAD:
+                snprintf(v, sizeof(v), "Slot %d%s", g_slot, file_exists(state_path(g_slot)) ? "" : " (empty)");
+                draw_row(x, y, w, sel, "Load state", v, true);
+                if (sel) help = "Left/Right picks the slot, A loads";
+                break;
+            case MAIN_DISC:
+                snprintf(v, sizeof(v), "Disc %d%s", g_disc_sel + 1, g_disc_sel == g_current_disc ? " (in)" : "");
+                draw_row(x, y, w, sel, "Change disc", v, true);
+                if (sel) help = "Pick a disc with Left/Right, A inserts it when the game asks";
+                break;
+            case MAIN_VIDEO: draw_row(x, y, w, sel, "Video", ">", false); break;
+            case MAIN_PERF: draw_row(x, y, w, sel, "Performance", ">", false); break;
+            case MAIN_CONTROLS: draw_row(x, y, w, sel, "Controls", ">", false); break;
+            case MAIN_RESET:
+                draw_row(x, y, w, sel, "Reset game", "", false);
+                if (sel) help = "Restarts the Saturn (unsaved progress is lost)";
+                break;
+            case MAIN_QUIT:
+                draw_row(x, y, w, sel, "Quit", g_quit_confirm ? "Press A again" : "", false);
+                if (sel) help = "Back to the homebrew menu";
+                break;
+            }
+        }
+    } else {
+        std::vector<const Setting *> items = page_settings(g_menu_page);
+        int n = (int)items.size();
+        for (int r = 0; r < n; r++, y += rh) {
+            const Setting &st = *items[r];
+            int ci = choice_index(st);
+            const char *val = ci >= 0 ? st.choices[ci].label : g_options[st.key].c_str();
+            draw_row(x, y, w, r == cur, st.label, val, true);
+            if (r == cur)
+                help = st.comment;
+        }
+        if (g_menu_page == MENU_CONTROLS) {
+            draw_row(x, y, w, cur == n, "Reset to default", "", false);
+            y += rh;
+        }
+        draw_row(x, y, w, cur == page_rows() - 1, "< Back", "", false);
+    }
+
+    if (*help) {
+        /* word-wrap to the panel, at most two lines */
+        const size_t maxc = (size_t)((pw - 60) / 12);
+        std::string rest = help, lines[2];
+        for (int l = 0; l < 2 && !rest.empty(); l++) {
+            if (rest.size() <= maxc) { lines[l] = rest; rest.clear(); break; }
+            size_t cut = rest.rfind(' ', maxc);
+            if (cut == std::string::npos || cut == 0) cut = maxc;
+            lines[l] = rest.substr(0, cut);
+            rest = trim(rest.substr(cut));
+        }
+        ui_text(px + 30, py + ph - 100, 1.5f, COL_DIM, lines[0].c_str());
+        ui_text(px + 30, py + ph - 80, 1.5f, COL_DIM, lines[1].c_str());
+    }
+    ui_text(px + 30, py + ph - 40, 1.5f, COL_DIM,
+            g_menu_page == MENU_MAIN ? "A select   Left/Right change   B or - close"
+                                     : "A or Left/Right change   B back   - close");
+}
+
+static void draw_overlay(void)
+{
+    if (g_options["show_fps"] == "on" && !g_menu_open) {
+        char b[32];
+        snprintf(b, sizeof(b), "%u FPS", g_fps);
+        float tw = ui_text_width(2, b);
+        ui_rect(UI_W - tw - 28, 12, tw + 16, 28, 0x00000090);
+        ui_text(UI_W - tw - 20, 18, 2, COL_TEXT, b);
+    }
+    if (g_menu_open)
+        draw_menu();
+    if (g_toast[0] && armGetSystemTick() < g_toast_until) {
+        float tw = ui_text_width(2, g_toast);
+        ui_rect(24, UI_H - 64, tw + 32, 40, 0x000000C0);
+        ui_text(40, UI_H - 52, 2, COL_TEXT, g_toast);
+    }
 }
 
 /* ------------------------------------------------------------------------ */
@@ -723,6 +1162,7 @@ int main(int argc, char **argv)
 
     set_default_options();
     load_config();
+    update_bindings();
 
     nx_clock_apply(atoi(g_options["cpu_mhz"].c_str()), atoi(g_options["gpu_mhz"].c_str()));
     atexit(at_exit_cleanup);
@@ -778,6 +1218,7 @@ int main(int argc, char **argv)
     nxlog("gl: %s | %s | %s", glGetString(GL_VERSION), glGetString(GL_RENDERER),
           glGetString(GL_SHADING_LANGUAGE_VERSION));
     create_fbo(1920, 1080);
+    ui_init();
 
     open_audio();
 
@@ -817,6 +1258,7 @@ int main(int argc, char **argv)
 
     bool running = true;
     u64 last_flush = armGetSystemTick();
+    unsigned fps_frames = 0;
     while (running && appletMainLoop()) {
         SDL_Event ev;
         while (SDL_PollEvent(&ev)) {
@@ -829,17 +1271,33 @@ int main(int argc, char **argv)
         u64 down = padGetButtonsDown(&g_pad);
         HidAnalogStickState stick = padGetStickPos(&g_pad, 0);
 
-        /* Hold - (Minus) for shortcuts; the game doesn't see buttons meanwhile. */
-        if (held & HidNpadButton_Minus) {
-            g_retropad = 0;
-            if (down & HidNpadButton_R) save_state(0);
-            if (down & HidNpadButton_L) load_state(0);
-            if (down & HidNpadButton_Right) change_disc(g_current_disc + 1);
-            if (down & HidNpadButton_Left) change_disc(g_current_disc - 1);
-            if (down & HidNpadButton_Plus) running = false;
-        } else {
-            g_retropad = map_buttons(held, stick);
+        /* Once a second: write any new in-game saves to the SD card, keep the
+         * clocks where we set them, update the FPS counter, flush the log. */
+        u64 now = armGetSystemTick();
+        if (armTicksToNs(now - last_flush) > 1000000000ULL) {
+            if (pdsnx_backup_flush())
+                nxlog("saves: wrote save memory");
+            nx_clock_maintain();
+            g_fps = g_frames_shown - fps_frames;
+            fps_frames = g_frames_shown;
+            nxlog_flush();
+            last_flush = now;
         }
+
+        if (g_menu_open) {
+            menu_input(held, down, stick);
+            if (g_quit_requested)
+                break;
+            present_inner();
+            if (g_audio_sync)
+                svcSleepThread(16000000LL);
+            continue;
+        }
+        if (down & HidNpadButton_Minus) {
+            open_menu();
+            continue;
+        }
+        g_retropad = map_buttons(held, stick);
 
         g_phase = 1;
         u64 t_run = armGetSystemTick();
@@ -848,16 +1306,6 @@ int main(int argc, char **argv)
         g_phase = 3;
         audio_wait();
         g_loop_iter++;
-
-        /* Once a second: write any new in-game saves to the SD card, flush the log. */
-        u64 now = armGetSystemTick();
-        if (armTicksToNs(now - last_flush) > 1000000000ULL) {
-            if (pdsnx_backup_flush())
-                nxlog("saves: wrote save memory");
-            nx_clock_maintain();
-            nxlog_flush();
-            last_flush = now;
-        }
     }
 
     nxlog("exiting");

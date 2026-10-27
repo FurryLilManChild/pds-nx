@@ -65,6 +65,17 @@ void nx_clock_apply(int cpu_mhz, int gpu_mhz)
     }
     want_cpu = cpu_mhz;
     want_gpu = gpu_mhz;
+    /* 0 = stock: undo an earlier boost */
+    if (cpu_mhz <= 0 && set_cpu) {
+        set_rate(PcvModuleId_CpuBus, PcvModule_CpuBus, orig_cpu);
+        set_cpu = 0;
+        nxlog("clock: CPU back to %u MHz", orig_cpu / 1000000);
+    }
+    if (gpu_mhz <= 0 && set_gpu) {
+        set_rate(PcvModuleId_GPU, PcvModule_GPU, orig_gpu);
+        set_gpu = 0;
+        nxlog("clock: GPU back to %u MHz", orig_gpu / 1000000);
+    }
     if (cpu_mhz > 0) {
         Result rc = set_rate(PcvModuleId_CpuBus, PcvModule_CpuBus, (u32)cpu_mhz * 1000000u);
         set_cpu = R_SUCCEEDED(rc);

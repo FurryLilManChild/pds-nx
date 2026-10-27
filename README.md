@@ -44,18 +44,16 @@ access for its CPU recompiler, so launching from the Album will not work.
 | + | Start |
 | D-pad or left stick | D-pad |
 
-Hold **−** for shortcuts:
+Tap **−** (Minus) to open the menu. The game pauses while it is open.
 
-| Shortcut | Action |
-| --- | --- |
-| − + R | Save state |
-| − + L | Load state |
-| − + D-pad Right / Left | Next / previous disc |
-| − + + | Quit |
+- **Save state / Load state**: 10 slots, pick one with Left/Right
+- **Change disc**: pick disc 1 to 4 when the game asks for it
+- **Video**: screen shape, filter, internal resolution, polygon mode, sky/floor settings
+- **Performance**: CPU and GPU clocks, audio or video timing, auto frameskip, FPS counter
+- **Controls**: assign any Switch button to each Saturn button
+- **Reset game**, **Quit**
 
-## Settings
-
-`config.ini` is created with comments on first run. Changes apply the next launch.
+Changes apply right away and are saved to `config.ini`.
 
 ## Building
 

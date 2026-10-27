@@ -1451,3 +1451,22 @@ void pdsnx_debug_state(unsigned *frame, int *line)
    *frame = yabsys.frame_count;
    *line  = yabsys.LineCount;
 }
+
+/* pds-nx: re-read the options and apply the video ones right away (called from
+ * the in-game menu between frames). Settings marked "(restart)" by the core
+ * that work live here: internal resolution and polygon mode. */
+void pdsnx_apply_video_options(void)
+{
+   check_variables();
+   if (!VIDCore)
+      return;
+   resolution_mode = g_resolution_mode;
+   retro_set_resolution();
+   VIDCore->SetSettingValue(VDP_SETTING_POLYGON_MODE, polygon_mode);
+   VIDCore->SetSettingValue(VDP_SETTING_RBG_RESOLUTION_MODE, g_rbg_resolution_mode);
+   VIDCore->SetSettingValue(VDP_SETTING_RBG_USE_COMPUTESHADER, g_rbg_use_compute_shader);
+   if (g_frame_skip)
+      EnableAutoFrameSkip();
+   else
+      DisableAutoFrameSkip();
+}

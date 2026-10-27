@@ -65,7 +65,7 @@ SRC_CXX := \
 	$(C)/Counter.cpp $(C)/ygl_texture.cpp $(C)/vdp1.cpp $(C)/vdp2.cpp \
 	$(C)/sh2_dynarec_devmiyax/DynarecSh2CInterface.cpp \
 	$(C)/sh2_dynarec_devmiyax/DynarecSh2.cpp \
-	switch/main.cpp
+	switch/main.cpp switch/nx_ui.cpp
 
 SRC_S := $(C)/sh2_dynarec_devmiyax/dynalib_arm64.s
 
