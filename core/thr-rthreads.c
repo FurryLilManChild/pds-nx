@@ -23,6 +23,8 @@
 #include <unistd.h>
 #ifndef __SWITCH__
 #include <sys/syscall.h>
+#else
+#include <switch.h>
 #endif
 #include <errno.h>
 #endif
@@ -192,7 +194,15 @@ void YabThreadSetCurrentThreadAffinityMask(int mask)
 #if defined(_WIN32)
 	SetThreadIdealProcessor(GetCurrentThread(), mask);
 #elif defined(__SWITCH__)
-	(void)mask; /* the Switch scheduler places threads itself */
+	/* Horizon does not time-slice threads of equal priority on one core, and
+	 * the sound thread busy-waits on the main thread. New threads start on the
+	 * main thread's core, so spread them out: main stays on core 0, sound
+	 * (asks for 3) and VDP (asks for 1) go to core 1, the rotation background
+	 * helper (asks for 2) to core 2. Core 3 belongs to the system. */
+	{
+		int core = (mask == 0) ? 0 : (mask == 2 ? 2 : 1);
+		svcSetThreadCoreMask(CUR_THREAD_HANDLE, core, 1u << core);
+	}
 #elif !defined(ANDROID) && !defined(__APPLE__) // it needs more than android-21
 	int err, syscallres;
 	pid_t pid = syscall(SYS_gettid);

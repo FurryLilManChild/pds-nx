@@ -1444,3 +1444,10 @@ int pdsnx_close_tray(const char *path)
    Cs2Area->cdi->ReadTOC(Cs2Area->TOC);
    return 0;
 }
+
+/* pds-nx: progress counters for the frontend's watchdog log. */
+void pdsnx_debug_state(unsigned *frame, int *line)
+{
+   *frame = yabsys.frame_count;
+   *line  = yabsys.LineCount;
+}

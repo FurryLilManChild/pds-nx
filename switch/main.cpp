@@ -42,6 +42,33 @@ extern "C" {
 void pdsnx_open_tray(void);
 int pdsnx_close_tray(const char *path);
 int pdsnx_backup_flush(void);
+void pdsnx_debug_state(unsigned *frame, int *line);
+}
+
+/* Progress counters for the watchdog log. */
+static volatile u64 g_loop_iter;
+static volatile unsigned g_frames_shown;
+static volatile int g_phase; /* 1 = in retro_run, 2 = presenting, 3 = between frames */
+static volatile bool g_watchdog_run;
+static Thread g_watchdog;
+
+static void watchdog_main(void *arg)
+{
+    (void)arg;
+    unsigned last_shown = 0;
+    while (g_watchdog_run) {
+        svcSleepThread(2000000000LL);
+        if (!g_watchdog_run)
+            break;
+        unsigned frame = 0;
+        int line = 0;
+        pdsnx_debug_state(&frame, &line);
+        nxlog("watchdog: loops=%llu shown=%u emu_frame=%u line=%d phase=%d%s",
+              (unsigned long long)g_loop_iter, g_frames_shown, frame, line, g_phase,
+              g_frames_shown == last_shown ? "  (no new frames)" : "");
+        last_shown = g_frames_shown;
+        nxlog_flush();
+    }
 }
 
 #define BASE_DIR "sdmc:/switch/pds-nx"
@@ -345,6 +372,12 @@ static void present(void)
 static void RETRO_CALLCONV video_refresh(const void *data, unsigned w, unsigned h, size_t pitch)
 {
     (void)pitch;
+    g_frames_shown++;
+    if (g_frames_shown <= 5 || g_frames_shown % 600 == 0) {
+        nxlog("frame %u (%ux%u%s)", g_frames_shown, w, h, data == RETRO_HW_FRAME_BUFFER_VALID ? "" : ", dupe");
+        nxlog_flush();
+    }
+    g_phase = 2;
     if (data == RETRO_HW_FRAME_BUFFER_VALID) {
         g_frame_w = w;
         g_frame_h = h;
@@ -590,6 +623,9 @@ int main(int argc, char **argv)
     nxlog_open(BASE_DIR "/pds-nx.log");
     nxlog("pds-nx starting");
 
+    /* Keep the main (emulation) thread on core 0; see thr-rthreads.c. */
+    svcSetThreadCoreMask(CUR_THREAD_HANDLE, 0, 1u << 0);
+
     padConfigureInput(1, HidNpadStyleSet_NpadStandard);
     padInitializeDefault(&g_pad);
 
@@ -688,6 +724,12 @@ int main(int argc, char **argv)
     nxlog("running");
     nxlog_flush();
 
+    /* The watchdog lives on core 2 at a higher priority, so it keeps logging
+     * even if the emulator stops making progress. */
+    g_watchdog_run = true;
+    if (R_SUCCEEDED(threadCreate(&g_watchdog, watchdog_main, NULL, NULL, 0x10000, 0x2B, 2)))
+        threadStart(&g_watchdog);
+
     bool running = true;
     u64 last_flush = armGetSystemTick();
     while (running && appletMainLoop()) {
@@ -714,7 +756,10 @@ int main(int argc, char **argv)
             g_retropad = map_buttons(held, stick);
         }
 
+        g_phase = 1;
         retro_run();
+        g_phase = 3;
+        g_loop_iter++;
 
         /* Once a second: write any new in-game saves to the SD card, flush the log. */
         u64 now = armGetSystemTick();
@@ -727,6 +772,9 @@ int main(int argc, char **argv)
     }
 
     nxlog("exiting");
+    g_watchdog_run = false;
+    threadWaitForExit(&g_watchdog);
+    threadClose(&g_watchdog);
     retro_unload_game();
     retro_deinit();
     if (g_audio)
