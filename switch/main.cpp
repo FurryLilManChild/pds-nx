@@ -204,7 +204,7 @@ static void set_default_options(void)
     g_options["yabasanshiro_polygon_mode"] = "perspective_correction";
     g_options["yabasanshiro_resolution_mode"] = "original";
     g_options["yabasanshiro_rbg_resolution_mode"] = "original";
-    g_options["yabasanshiro_rbg_use_compute_shader"] = "disabled";
+    g_options["yabasanshiro_rbg_use_compute_shader"] = "enabled";
     set_default_buttons();
 }
 
