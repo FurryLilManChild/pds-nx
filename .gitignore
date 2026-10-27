@@ -1,0 +1,16 @@
+# build output
+/build/
+/dist/
+*.elf
+*.nro
+*.nacp
+*.map
+
+# never commit game data or firmware
+assets/
+*.bin
+*.cue
+*.chd
+*.iso
+*.zip
+*.state
