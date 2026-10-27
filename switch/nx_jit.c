@@ -175,3 +175,15 @@ void nx_jit_code_written(uintptr_t lo, uintptr_t hi)
         if (hi > r->dirty_hi) r->dirty_hi = hi;
     }
 }
+
+/* Unmap every code buffer. Must run before the app exits: the homebrew loader
+ * aborts if code memory is still mapped when it takes the process back. */
+void nx_jit_shutdown(void)
+{
+    for (int i = 0; i < MAX_REGIONS; i++) {
+        if (regions[i].used) {
+            jitClose(&regions[i].jit);
+            regions[i].used = 0;
+        }
+    }
+}

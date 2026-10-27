@@ -36,6 +36,7 @@
 
 #include <libretro.h>
 
+#include "nx_clock.h"
 #include "nx_log.h"
 
 extern "C" {
@@ -43,6 +44,7 @@ void pdsnx_open_tray(void);
 int pdsnx_close_tray(const char *path);
 int pdsnx_backup_flush(void);
 void pdsnx_debug_state(unsigned *frame, int *line);
+void nx_jit_shutdown(void);
 }
 
 /* Progress counters for the watchdog log. */
@@ -85,6 +87,15 @@ static const char *const k_default_config =
     "# Lines starting with # are ignored. Changes apply the next time you launch.\n"
     "\n"
     "# Screen shape: 4:3 (original) or 16:9 (stretched to fill)\n"
+    "# Switch CPU speed while playing, in MHz. Stock is 1020; 1785 is the highest\n"
+    "# safe speed and what the emulator needs for full speed. 0 leaves it alone\n"
+    "# (use that if you'd rather manage clocks with sys-clk).\n"
+    "cpu_mhz=1785\n"
+    "\n"
+    "# Switch GPU speed in MHz, 0 leaves it alone. Try 768 if higher internal\n"
+    "# resolutions stutter in handheld mode.\n"
+    "gpu_mhz=0\n"
+    "\n"
     "aspect=4:3\n"
     "\n"
     "# Scaling filter when drawing to the screen: linear or nearest\n"
@@ -115,6 +126,8 @@ static void set_default_options(void)
 {
     g_options["aspect"] = "4:3";
     g_options["filter"] = "linear";
+    g_options["cpu_mhz"] = "1785";
+    g_options["gpu_mhz"] = "0";
     g_options["yabasanshiro_force_hle_bios"] = "disabled";
     g_options["yabasanshiro_frameskip"] = "disabled";
     g_options["yabasanshiro_addon_cart"] = "4M_extended_ram";
@@ -612,6 +625,14 @@ static bool RETRO_CALLCONV environment(unsigned cmd, void *data)
 /* Main                                                                     */
 /* ------------------------------------------------------------------------ */
 
+/* Runs on every way out of main: give the clocks back and unmap code memory
+ * (the homebrew loader crashes if code memory is left mapped). */
+static void at_exit_cleanup(void)
+{
+    nx_clock_restore();
+    nx_jit_shutdown();
+}
+
 int main(int argc, char **argv)
 {
     (void)argc;
@@ -642,6 +663,9 @@ int main(int argc, char **argv)
 
     set_default_options();
     load_config();
+
+    nx_clock_apply(atoi(g_options["cpu_mhz"].c_str()), atoi(g_options["gpu_mhz"].c_str()));
+    atexit(at_exit_cleanup);
 
     std::string bios = find_bios();
     if (bios.empty()) {
@@ -766,6 +790,7 @@ int main(int argc, char **argv)
         if (armTicksToNs(now - last_flush) > 1000000000ULL) {
             if (pdsnx_backup_flush())
                 nxlog("saves: wrote save memory");
+            nx_clock_maintain();
             nxlog_flush();
             last_flush = now;
         }

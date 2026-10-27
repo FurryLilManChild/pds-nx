@@ -59,7 +59,7 @@ SRC_C := \
 	$(LZ)/src/LzmaEnc.c $(LZ)/src/LzFind.c $(LZ)/src/LzmaDec.c \
 	$(ZL)/adler32.c $(ZL)/crc32.c $(ZL)/inffast.c $(ZL)/inflate.c \
 	$(ZL)/inftrees.c $(ZL)/zutil.c \
-	switch/nx_jit.c switch/nx_log.c
+	switch/nx_jit.c switch/nx_log.c switch/nx_clock.c
 
 SRC_CXX := \
 	$(C)/Counter.cpp $(C)/ygl_texture.cpp $(C)/vdp1.cpp $(C)/vdp2.cpp \
